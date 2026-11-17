@@ -125,8 +125,13 @@ function fitText() {
 function drawPlayers() { const sel = $('player'); sel.replaceChildren(); players.forEach(p => { const o = document.createElement('option'); o.value = p.token; o.textContent = p.label; o.selected = p.token === token; sel.append(o); }); sel.disabled = busy || players.length < 2; $('newPlayer').disabled = busy || !INFO || INFO.state !== 'open' || Date.now() > INFO.endMs; $('renamePlayer').disabled = busy || !card; }
 function render() {
     drawPlayers();
-    for (const id of ['save', 'print'])
-        $(id).disabled = busy || !card;
+    const done = !!(card && card.submitted);
+    $('save').hidden = !done;
+    $('saveNote').hidden = !done;
+    $('autosaveNote').hidden = done;
+    $('received').hidden = !done;
+    $('save').disabled = busy || !card;
+    $('print').disabled = busy || !card;
     $('refresh').disabled = busy;
     $('claim').disabled = busy || !card || !winning().length || card.submitted || !canPlay();
     $('claim').hidden = !!(card && card.submitted);
@@ -437,7 +442,7 @@ async function buildCardImage(opts = {}) {
     throw Error('Card image is too large to submit.');
 }
 async function saveMyCard() {
-    if (busy || !card)
+    if (busy || !card || !card.submitted)
         return;
     busy = true;
     render();
@@ -576,7 +581,7 @@ async function submit(e) {
         message(statusText());
     }
     catch (e) {
-        $('entryError').textContent = e.message + ' Your saved photos remain on this device. Retry before the deadline.';
+        $('entryError').textContent = 'Your entry has not been confirmed. Your photos are still saved on this device. Please try again. (' + e.message + ')';
     }
     finally {
         busy = false;
@@ -673,7 +678,13 @@ function reviewText() {
         return 'Your prize is marked as delivered. Thank you for playing! Receipt: ' + card.receipt;
     return 'Entry received: ' + card.receipt + '. Awaiting organizer review.';
 }
-function setUploading(on) { $('uploadProgress').hidden = !on; $('entryForm').setAttribute('aria-busy', String(on)); }
+function warnLeave(e) { e.preventDefault(); e.returnValue = ''; }
+function setUploading(on) {
+    if (on) window.addEventListener('beforeunload', warnLeave); else window.removeEventListener('beforeunload', warnLeave);
+    $('uploadProgress').hidden = !on;
+    $('entryForm').setAttribute('aria-busy', String(on));
+    $('send').textContent = on ? 'Submitting…' : 'Submit Entry';
+}
 $('file').onchange = handlePhoto;
 $('claim').onclick = openEntry;
 $('later').onclick = () => {
