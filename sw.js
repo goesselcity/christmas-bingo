@@ -1,5 +1,5 @@
-// Revision 5: versioned shell. No API responses or local photos are cached here.
-const CACHE = 'goessel-bingo-local-first-v5-20261117-' + self.registration.scope;
+// Revision 4: versioned shell. No API responses or local photos are cached here.
+const CACHE = 'goessel-bingo-local-first-v4-20261117-' + self.registration.scope;
 const SHELL = ['index.html', 'app.js'].map(p => new URL(p, self.registration.scope).href);
 self.addEventListener('install', e => e.waitUntil(caches.open(CACHE).then(c => c.addAll(SHELL.map(u => new Request(u, { cache: 'reload' }))))));
 self.addEventListener('activate', e => e.waitUntil(Promise.all([caches.keys().then(keys => Promise.all(keys.filter(k => k.startsWith('goessel-bingo-local-first-') && k.endsWith(self.registration.scope) && k !== CACHE).map(k => caches.delete(k)))), self.clients.claim()])));
