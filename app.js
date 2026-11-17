@@ -1,5 +1,5 @@
 'use strict';
-// Revision 5.0 - staged card images and single-call ready submission.
+// Revision 3.0 - integrated controls, submitted names and nonblocking background uploads.
 const API_URL = 'https://script.google.com/macros/s/AKfycbwTf3_KBWv-uMdS_cP5as62CDnZwR2KeSxB9xN58-CBog-Y0g_-oYastKuJOKHJLCD8/exec';
 const TEST_KEY = new URLSearchParams(location.hash.slice(1)).get('test') || '';
 const $ = id => document.getElementById(id), KEY = 'christmas-bingo-v2-token', LIST = 'christmas-bingo-players';
@@ -63,7 +63,7 @@ function legacy(k, f) {
         return f;
     }
 }
-async function rpcRaw(action, ...args) {
+async function rpc(action, ...args) {
     const controller = new AbortController(), timer = setTimeout(() => controller.abort(), 60000);
     try {
         const res = await fetch(API_URL, { method: 'POST', headers: { 'Content-Type': 'text/plain;charset=utf-8' }, body: JSON.stringify({ action, args, ...(TEST_KEY ? { testKey: TEST_KEY } : {}) }), signal: controller.signal });
@@ -86,93 +86,6 @@ async function rpcRaw(action, ...args) {
     finally {
         clearTimeout(timer);
     }
-}
-const timingLog = [];
-function recordTiming(action, ms, ok = true) { timingLog.push({ action, ms: Math.round(ms), ok, at: new Date().toISOString() }); if (timingLog.length > 100)
-    timingLog.shift(); }
-window.bingoTimingReport = () => timingLog.map(x => ({ ...x }));
-async function rpc(action, ...args) { const t = performance.now(); try {
-    const out = await rpcRaw(action, ...args);
-    recordTiming(action, performance.now() - t);
-    return out;
-}
-catch (e) {
-    recordTiming(action, performance.now() - t, false);
-    throw e;
-} }
-async function preparationSnapshot(t) {
-    const c = await read('cards', t);
-    if (!c)
-        throw Error('Card not found on this device.');
-    const ps = new Map((await all('photos')).filter(p => p.token === t).map(p => [p.slot, p]));
-    if (c.order.some(i => !ps.has(i)))
-        throw Error('Some photos are missing. Use the original playing device.');
-    const versions = Object.fromEntries(c.order.map(i => [i, ps.get(i).requestId]));
-    const content = JSON.stringify({ eventId: c.eventId, clues: c.clues, order: c.order, versions, details: c.details, first: c.firstBingoCount, mode: INFO.photoMode });
-    const hash = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(content));
-    const fingerprint = Array.from(new Uint8Array(hash), b => b.toString(16).padStart(2, '0')).join('');
-    return { c, ps, versions, fingerprint };
-}
-async function prepareFast(t, foreground) {
-    let snap = await preparationSnapshot(t);
-    const { c, ps, versions, fingerprint } = snap;
-    if (isSubmitted(c))
-        return { receipt: c.receipt, submittedName: c.submittedName };
-    if (!winning(c.order).length || !validDetails(c.details))
-        throw Error('A completed Bingo and player details are required.');
-    if (c.fastReady?.fingerprint === fingerprint && c.fastReady.photosReady !== false)
-        return c.fastReady;
-    if (!foreground && c.details.consentVersion !== 'organizer-review-preparation-v2')
-        return null;
-    const remote = await rpc('registerCard', t, { clues: c.clues, eventId: c.eventId, uploadConsent: true });
-    await mutateCard(t, x => { x.registered = true; });
-    if (remote.submitted)
-        return await rpc('loadCard', t);
-    let selected = INFO.photoMode === 'All photos' ? c.order.slice() : [];
-    let serverVersions = remote.photoVersions || {};
-    if (foreground) {
-        const plan = await rpc('preparePhotosV5', t, { order: c.order, versions, historyReliable: c.historyReliable });
-        if (plan.receipt)
-            return await rpc('loadCard', t);
-        selected = plan.selected;
-        serverVersions = plan.photoVersions || {};
-    }
-    if (!foreground && selected.some(i => !ps.get(i).uploaded))
-        return null;
-    for (const i of selected) {
-        const photo = ps.get(i);
-        if (serverVersions[i] !== photo.requestId) {
-            await rpc('savePhoto', t, i, photo.data, photo.requestId);
-            await markUploaded(photo);
-        }
-    }
-    if (foreground && c.fastReady?.fingerprint === fingerprint) {
-        const ready = { ...c.fastReady, photosReady: true };
-        await mutateCard(t, x => { x.fastReady = ready; });
-        return ready;
-    }
-    // Reuse a local rendered pair across network retries; keep only the latest pair per player.
-    let cached = await read('kv', 'rendered-v5:' + t);
-    if (!cached || cached.fingerprint !== fingerprint) {
-        const start = performance.now();
-        await new Promise(r => setTimeout(r, 0));
-        const privateImage = await buildCardImage({ isPrivate: true, ...c.details, snapshotCard: c, snapshotPhotos: ps });
-        await new Promise(r => setTimeout(r, 0));
-        const shareImage = await buildCardImage({ snapshotCard: c, snapshotPhotos: ps });
-        recordTiming('render-card-pair', performance.now() - start);
-        cached = { key: 'rendered-v5:' + t, fingerprint, privateImage, shareImage };
-        await writeRecords([['kv', cached]]);
-    }
-    if ((await preparationSnapshot(t)).fingerprint !== fingerprint)
-        return null;
-    const staged = await rpc('stageEntryV5', t, { fingerprint, order: c.order, versions, historyReliable: c.historyReliable, details: c.details, privateImage: cached.privateImage, shareImage: cached.shareImage });
-    if (staged.receipt)
-        return staged;
-    if ((await preparationSnapshot(t)).fingerprint !== fingerprint)
-        return null;
-    const ready = { fingerprint, mode: INFO.photoMode, photosReady: foreground || INFO.photoMode !== 'Winning photos only', preparedAt: new Date().toISOString() };
-    await mutateCard(t, x => { x.fastReady = ready; });
-    return ready;
 }
 function canPlay() { return !!INFO && INFO.state === 'open' && Date.now() >= INFO.startMs && Date.now() <= INFO.endMs && (!card || !card.eventId || card.eventId === INFO.eventId); }
 function isSubmitted(c = card) { return !!(c && (c.submitted || c.receipt)); }
@@ -397,10 +310,8 @@ async function createLocalPlayer(details) {
     await activate(t);
     message('Your card is ready. Progress saves automatically on this device.');
 }
-function renamePlayer() {
-    if (!busy && card && !isSubmitted())
-        openPlayerDetails('edit');
-}
+function renamePlayer() { if (!busy && card && !isSubmitted())
+    openPlayerDetails('edit'); }
 function openEntry() {
     if (!card || isSubmitted() || !winning().length)
         return;
@@ -509,47 +420,42 @@ async function runBackground() {
         return;
     bgPromise = (async () => {
         try {
-            const candidates = (await all('cards')).filter(c => !isSubmitted(c) && !c.draft && c.uploadConsent);
-            if (!candidates.length)
+            const eligible = (await all('cards')).filter(c => !isSubmitted(c) && !c.draft && c.uploadConsent);
+            const queued = await all('photos');
+            if (!eligible.some(c => queued.some(p => p.token === c.token && !p.uploaded)))
                 return;
             await refreshInfo();
-            if (INFO.state !== 'open' || Date.now() > INFO.endMs)
+            if (INFO.photoMode !== 'All photos' || INFO.state !== 'open' || Date.now() > INFO.endMs)
                 return;
-            for (const old of candidates) {
+            const cards = await all('cards');
+            for (const snapshot of cards) {
                 if (submitting)
                     break;
-                let c = await read('cards', old.token);
-                if (!c || isSubmitted(c) || c.draft || c.eventId !== INFO.eventId)
+                let c = await read('cards', snapshot.token);
+                if (!c || isSubmitted(c) || c.draft || !c.uploadConsent || c.eventId !== INFO.eventId)
                     continue;
-                let remote = null;
-                if (INFO.photoMode === 'All photos') {
-                    const pending = (await all('photos')).filter(p => p.token === c.token && !p.uploaded);
-                    if (pending.length) {
-                        remote = await rpc('registerCard', c.token, { clues: c.clues, eventId: c.eventId, uploadConsent: true });
-                        await mutateCard(c.token, x => { x.registered = true; });
-                        if (remote.submitted)
-                            continue;
-                        for (const oldPhoto of pending) {
-                            if (submitting)
-                                break;
-                            const photo = await read('photos', oldPhoto.key);
-                            if (!photo || photo.uploaded)
-                                continue;
-                            await rpc('savePhoto', c.token, photo.slot, photo.data, photo.requestId);
-                            await markUploaded(photo);
-                        }
-                    }
+                const pending = (await all('photos')).filter(p => p.token === c.token && !p.uploaded);
+                if (!pending.length)
+                    continue;
+                const remote = await rpc('registerCard', c.token, { clues: c.clues, eventId: c.eventId, uploadConsent: true });
+                await mutateCard(c.token, local => { local.registered = true; });
+                if (remote.submitted)
+                    continue;
+                for (const old of pending) {
+                    if (submitting)
+                        break;
+                    c = await read('cards', c.token);
+                    if (c.draft || isSubmitted(c))
+                        break;
+                    const p = await read('photos', old.key);
+                    if (!p || p.uploaded)
+                        continue;
+                    await rpc('savePhoto', c.token, p.slot, p.data, p.requestId);
+                    await markUploaded(p);
                 }
-                if (submitting)
-                    break;
-                c = await read('cards', c.token);
-                if (winning(c.order).length && validDetails(c.details) && c.details.consentVersion === 'organizer-review-preparation-v2')
-                    await prepareFast(c.token, false);
             }
         }
-        catch (e) {
-            recordTiming('background-error', 0, false);
-        }
+        catch (e) { /* Local originals remain queued. Foreground submission reports actionable errors. */ }
         finally {
             bgPromise = null;
             if (!submitting)
@@ -558,9 +464,9 @@ async function runBackground() {
     })();
     await bgPromise;
 }
+// Full photos are fitted above clue labels, never cropped in the organizer image.
 async function buildCardImage(opts = {}) {
-    const imageCard = opts.snapshotCard || card, imagePhotos = opts.snapshotPhotos || photos;
-    if (!imageCard)
+    if (!card)
         throw Error('No card loaded.');
     const priv = !!opts.isPrivate, T = priv ? 360 : 240, G = 8, P = 30, H = priv ? 260 : 200, W = P * 2 + T * 5 + G * 4, HEIGHT = H + P + T * 5 + G * 4 + P, c = document.createElement('canvas');
     c.width = W;
@@ -592,11 +498,11 @@ async function buildCardImage(opts = {}) {
     if (priv) {
         fitLine(opts.name + ' • ' + new Date().toLocaleDateString(), 170, 32);
         fitLine([opts.phone, opts.email].filter(Boolean).join(' • '), 207, 28);
-        fitLine(imageCard.firstBingoCount ? 'Bingo after ' + imageCard.firstBingoCount + ' clues • ' + imageCard.order.length + ' completed' : 'Clues completed: ' + imageCard.order.length, 240, 24);
+        fitLine(card.firstBingoCount ? 'Bingo after ' + card.firstBingoCount + ' clues • ' + card.order.length + ' completed' : 'Clues completed: ' + card.order.length, 240, 24);
     }
     else
         fitLine('Community Christmas Bingo', 170, 24);
-    const win = new Set(winning(imageCard.order).flat());
+    const win = new Set(winning().flat());
     function wrap(text, cx, y, width, size) {
         x.font = 'bold ' + size + 'px system-ui';
         const ls = [];
@@ -615,7 +521,7 @@ async function buildCardImage(opts = {}) {
         ls.forEach((l, i) => x.fillText(l, cx, y + i * (size + 3)));
     }
     for (let i = 0; i < 25; i++) {
-        const tx = P + (i % 5) * (T + G), ty = H + P + Math.floor(i / 5) * (T + G), p = imagePhotos.get(i), labelH = priv ? 85 : 68;
+        const tx = P + (i % 5) * (T + G), ty = H + P + Math.floor(i / 5) * (T + G), p = photos.get(i), labelH = priv ? 85 : 68;
         x.fillStyle = i === 12 ? '#b3202a' : '#fffaf0';
         x.fillRect(tx, ty, T, T);
         if (i === 12) {
@@ -623,17 +529,17 @@ async function buildCardImage(opts = {}) {
             x.font = 'bold ' + (priv ? 64 : 44) + 'px Georgia';
             x.fillText('FREE', tx + T / 2, ty + T / 2 + 15);
         }
-        else if (p && imageCard.order.includes(i)) {
+        else if (p && card.order.includes(i)) {
             const im = await loadImage(p.data), areaH = T - labelH, s = Math.min(T / im.width, areaH / im.height), w = im.width * s, h = im.height * s;
             x.fillStyle = '#0d3d29';
             x.fillRect(tx, ty, T, T);
             x.drawImage(im, tx + (T - w) / 2, ty + (areaH - h) / 2, w, h);
             x.fillStyle = '#fff';
-            wrap(imageCard.clues[i], tx + T / 2, ty + areaH + 24, T - 20, priv ? 23 : 18);
+            wrap(card.clues[i], tx + T / 2, ty + areaH + 24, T - 20, priv ? 23 : 18);
         }
         else {
             x.fillStyle = '#65756a';
-            wrap(imageCard.clues[i], tx + T / 2, ty + T / 2 - 20, T - 20, priv ? 23 : 18);
+            wrap(card.clues[i], tx + T / 2, ty + T / 2 - 20, T - 20, priv ? 23 : 18);
         }
         if (win.has(i)) {
             x.strokeStyle = '#d9a634';
@@ -736,41 +642,60 @@ async function submit(e) {
     e.preventDefault();
     if (busy || !card)
         return;
-    if (!validDetails(card.details)) {
+    const info = card.details;
+    $('entryError').textContent = '';
+    if (!validDetails(info)) {
         openPlayerDetails('submit');
         return;
     }
     busy = true;
     submitting = true;
     clearTimeout(bgTimer);
-    $('entryError').textContent = '';
     $('send').disabled = true;
     $('later').disabled = true;
     $('editFromEntry').disabled = true;
     setUploading(true);
     render();
-    const started = performance.now();
     try {
         if (bgPromise)
             await bgPromise;
-        let prepared = await prepareFast(token, true);
-        if (!prepared)
-            throw Error('Card changed during preparation. Please retry.');
-        if (prepared.receipt) {
-            await finishSubmission(prepared, card.details.name);
+        await refreshInfo();
+        if (!canPlay())
+            throw Error(statusText());
+        card = await read('cards', token);
+        const remote = await rpc('registerCard', token, { clues: card.clues, eventId: card.eventId, uploadConsent: card.uploadConsent === true });
+        card.registered = true;
+        await saveCard();
+        if (remote.submitted) {
+            await finishSubmission(await rpc('loadCard', token), info.name);
             return;
         }
-        const r = await rpc('finalizeEntryV5', token, prepared.fingerprint);
-        await finishSubmission(r, card.details.name);
+        for (const i of card.order)
+            if (!photos.has(i))
+                throw Error('Some photos are missing. Use the original playing device.');
+        const versions = Object.fromEntries(card.order.map(i => [i, photos.get(i).requestId])), m = await rpc('prepareSubmission', token, { order: card.order, historyReliable: card.historyReliable, versions });
+        if (m.receipt) {
+            await finishSubmission(await rpc('loadCard', token), info.name);
+            return;
+        }
+        if (JSON.stringify(m.order) !== JSON.stringify(card.order))
+            throw Error('Submission started with a different card state. Refresh Status and retry.');
+        card.draft = true;
+        await saveCard();
+        for (const i of m.selected) {
+            const p = photos.get(i), serverVersion = remote.photoVersions?.[i];
+            if (!p.uploaded || serverVersion !== p.requestId) {
+                await rpc('savePhoto', token, i, p.data, p.requestId);
+                await markUploaded(p);
+            }
+        }
+        const priv = await buildCardImage({ isPrivate: true, ...info }), pub = await buildCardImage(), r = await rpc('submitEntry', token, info, priv, pub);
+        await finishSubmission(r, info.name);
     }
     catch (e) {
-        // Never accept stale prepared assets after a mode/photo change. Rebuild on explicit retry.
-        await mutateCard(token, c => { delete c.fastReady; }).catch(() => { });
-        await refreshInfo().catch(() => { });
         $('entryError').textContent = 'Your entry has not been confirmed. Your photos are still saved on this device. Please try again. (' + e.message + ')';
     }
     finally {
-        recordTiming('submit-total', performance.now() - started, isSubmitted());
         busy = false;
         submitting = false;
         $('send').disabled = false;
@@ -889,7 +814,7 @@ function openPlayerDetails(purpose) {
     f.elements.name.value = d?.name || ((purpose !== 'new' && players.find(p => p.token === token)?.label && !/^Player \d+$/.test(players.find(p => p.token === token).label)) ? players.find(p => p.token === token).label : '');
     f.elements.phone.value = d?.phone || '';
     f.elements.email.value = d?.email || '';
-    f.elements.consent.checked = d?.consent === true && d?.consentVersion === 'organizer-review-preparation-v2';
+    f.elements.consent.checked = d?.consent === true;
     $('playerTitle').textContent = purpose === 'new' ? 'Create a player' : 'Player details';
     $('playerSave').textContent = purpose === 'new' ? 'Start Playing' : purpose === 'submit' ? 'Continue to Submit' : 'Save Details';
     if ($('entry').open)
@@ -901,7 +826,7 @@ async function savePlayerDetails(e) {
     e.preventDefault();
     if (busy)
         return;
-    const f = $('playerForm'), details = { name: f.elements.name.value.trim(), phone: f.elements.phone.value.trim(), email: f.elements.email.value.trim(), consent: f.elements.consent.checked, consentVersion: 'organizer-review-preparation-v2', consentedAt: new Date().toISOString() };
+    const f = $('playerForm'), details = { name: f.elements.name.value.trim(), phone: f.elements.phone.value.trim(), email: f.elements.email.value.trim(), consent: f.elements.consent.checked, consentVersion: 'organizer-review-background-v1', consentedAt: new Date().toISOString() };
     if (details.phone.length > 40 || details.email.length > 254 || /[\x00-\x1f]/.test(details.name + details.phone + details.email) || !validDetails(details)) {
         $('playerError').textContent = 'Enter a name, a valid phone number or email, and check the agreement.';
         return;
@@ -952,18 +877,12 @@ $('entry').addEventListener('cancel', e => {
 });
 $('entryForm').onsubmit = submit;
 $('playerForm').onsubmit = savePlayerDetails;
-$('playerCancel').onclick = () => {
-    if (!busy)
-        $('playerDetails').close();
-};
-$('playerDetails').addEventListener('cancel', e => {
-    if (busy)
-        e.preventDefault();
-});
-$('editFromEntry').onclick = () => {
-    if (!busy)
-        openPlayerDetails('submit');
-};
+$('playerCancel').onclick = () => { if (!busy)
+    $('playerDetails').close(); };
+$('playerDetails').addEventListener('cancel', e => { if (busy)
+    e.preventDefault(); });
+$('editFromEntry').onclick = () => { if (!busy)
+    openPlayerDetails('submit'); };
 $('save').onclick = saveMyCard;
 $('print').onclick = printCard;
 $('refresh').onclick = refreshStatus;
