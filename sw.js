@@ -1,5 +1,5 @@
-// Revision 4.1: versioned shell. No API responses or local photos are cached here.
-const CACHE = 'goessel-bingo-local-first-v4-1-20261117-' + self.registration.scope;
+// Revision 4.2: versioned shell. No API responses or local photos are cached here.
+const CACHE = 'goessel-bingo-local-first-v4-2-20261117-' + self.registration.scope;
 const SHELL = ['index.html', 'app.js'].map(p => new URL(p, self.registration.scope).href);
 
 self.addEventListener('install', e => {
