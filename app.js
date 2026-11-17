@@ -1,5 +1,5 @@
 'use strict';
-// Revision 4.1 - Rev 4 app.js + storage reconnect fix + tap-to-remove/replace photo.
+// Revision 4.2 - submit error note. Rev 4 app.js + storage reconnect fix + tap-to-remove/replace photo.
 const API_URL = 'https://script.google.com/macros/s/AKfycbwTf3_KBWv-uMdS_cP5as62CDnZwR2KeSxB9xN58-CBog-Y0g_-oYastKuJOKHJLCD8/exec';
 const TEST_KEY = new URLSearchParams(location.hash.slice(1)).get('test') || '';
 const $ = id => document.getElementById(id), KEY = 'christmas-bingo-v2-token', LIST = 'christmas-bingo-players';
@@ -655,7 +655,7 @@ async function submit(e) {
     const priv = await buildCardImage({ isPrivate: true, ...info }), pub = await buildCardImage(), r = await rpc('submitEntry', token, info, priv, pub);
     await finishSubmission(r, info.name);
   } catch (e) {
-    $('entryError').textContent = 'Your entry has not been confirmed. Your photos are still saved on this device. Please try again. (' + e.message + ')';
+    $('entryError').textContent = 'Your entry has not been confirmed. Your photos are still saved on this device. Tap Submit Bingo to try again. If it still does not work, refresh this page and submit again. (' + e.message + ')';
   } finally {
     busy = false;
     submitting = false;
