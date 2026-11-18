@@ -1,5 +1,8 @@
 'use strict';
-// Revision 4.2 - submit error note. Rev 4 app.js + storage reconnect fix + tap-to-remove/replace photo.
+// Revision 4.3 - first-visit page (Start Bingo / Print a Card, no automatic player form),
+//   Print a Card opens on the game's start day, "Uploading your submission…" spinner,
+//   quiet review-status check so the phone reflects spreadsheet approval.
+// Builds on Rev 4.2 (submit error note, storage reconnect fix, tap-to-remove/replace photo).
 const API_URL = 'https://script.google.com/macros/s/AKfycbwTf3_KBWv-uMdS_cP5as62CDnZwR2KeSxB9xN58-CBog-Y0g_-oYastKuJOKHJLCD8/exec';
 const TEST_KEY = new URLSearchParams(location.hash.slice(1)).get('test') || '';
 const $ = id => document.getElementById(id), KEY = 'christmas-bingo-v2-token', LIST = 'christmas-bingo-players';
@@ -115,6 +118,9 @@ async function rpc(action, ...args) {
 
 // ---------- Status ----------
 function canPlay() { return !!INFO && INFO.state === 'open' && Date.now() >= INFO.startMs && Date.now() <= INFO.endMs && (!card || !card.eventId || card.eventId === INFO.eventId); }
+// Rev 4.3: Print a Card opens at midnight (local time) on the day the game starts - not before.
+function printOpensMs() { const d = new Date(INFO.startMs); d.setHours(0, 0, 0, 0); return d.getTime(); }
+function canPrint() { return !!INFO && INFO.state !== 'paused' && INFO.state !== 'closed' && Date.now() >= printOpensMs() && Date.now() <= INFO.endMs; }
 function isSubmitted(c = card) { return !!(c && (c.submitted || c.receipt)); }
 function reviewText() {
   const r = card.reviewStatus || 'Pending review';
@@ -128,9 +134,10 @@ function statusText() {
   if (!INFO) return 'Open the game online once to prepare your card.';
   if (card && card.eventId !== INFO.eventId) return 'This card belongs to an earlier event. Start a new player card.';
   if (INFO.state === 'paused') return 'Christmas Bingo is paused. Please try again later.';
-  if (Date.now() < INFO.startMs || INFO.state === 'upcoming') return 'Christmas Bingo opens ' + INFO.text.startDate + '. See you then!';
+  if (Date.now() < INFO.startMs || INFO.state === 'upcoming') return 'Christmas Bingo opens ' + INFO.text.startDate + '.' + (canPrint() ? ' You can print a card today.' : ' See you then!');
   if (Date.now() > INFO.endMs || INFO.state === 'closed') return 'The entry deadline has passed. Thank you for playing!';
-  if (card && card.draft) return 'Submission started. Tap Submit Bingo to finish. Your photos remain on this device.';
+  if (!card) return 'Tap Start Bingo to play on this phone, or Print a Card to play on paper.';
+  if (card.draft) return 'Submission started. Tap Submit Bingo to finish. Your photos remain on this device.';
   return 'Your progress saves automatically on this device.';
 }
 function applyInfo() {
@@ -161,12 +168,22 @@ function fitText() {
     while (size > 6.5 && (el.scrollWidth > el.clientWidth + .5 || el.scrollHeight > max)) { size -= .5; el.style.fontSize = size + 'px'; }
   });
 }
+// Rev 4.3: swap a button's label without losing the label written in index.html.
+function setLabel(el, text) {
+  if (!el) return;
+  if (el.dataset.label === undefined) el.dataset.label = el.textContent;
+  el.textContent = text || el.dataset.label;
+}
 function drawPlayers() {
   const sel = $('player');
   sel.replaceChildren();
   players.forEach(p => { const o = document.createElement('option'); o.value = p.token; o.textContent = p.label; o.selected = p.token === token; sel.append(o); });
   sel.disabled = busy || players.length < 2;
+  sel.hidden = !players.length;
+  // First visit: the New Player button becomes "Start Bingo".
+  setLabel($('newPlayer'), players.length ? '' : 'Start Bingo');
   $('newPlayer').disabled = busy || !INFO || INFO.state !== 'open' || Date.now() < INFO.startMs || Date.now() > INFO.endMs;
+  $('renamePlayer').hidden = !card;
   $('renamePlayer').disabled = busy || !card || isSubmitted();
 }
 function render() {
@@ -177,14 +194,20 @@ function render() {
   $('save').hidden = !done;
   $('save').disabled = busy || !done;
   $('saveNote').hidden = !done;
-  $('autosaveNote').hidden = done;
+  $('autosaveNote').hidden = done || !card;
   $('received').hidden = !done;
+  // Rev 4.3: Print a Card shows on the first-visit page; enabled from the start day on.
+  setLabel($('print'), card ? '' : 'Print a Card');
   $('print').hidden = done;
-  $('print').disabled = busy || !card || done;
+  $('print').disabled = busy || done || (!card && !canPrint());
   if ($('printNote')) $('printNote').hidden = done;
+  $('refresh').hidden = !card;
   $('refresh').disabled = busy;
-  $('claim').hidden = done;
+  $('claim').hidden = done || !card;
   $('claim').disabled = busy || !card || !winning().length || done || !canPlay();
+  // Rev 4.3: no card yet = no empty grid at the bottom of the page.
+  $('grid').hidden = !card;
+  $('progress').hidden = !card;
   $('grid').replaceChildren();
   if (!card) { $('progress').textContent = ''; return; }
   const wins = new Set(winning().flat());
@@ -274,16 +297,21 @@ function randomBelow(n) {
   do { v = crypto.getRandomValues(new Uint32Array(1))[0]; } while (v >= max);
   return v % n;
 }
+// Rev 4.3: shared shuffle for new player cards and printed paper cards.
+function shuffledClues() {
+  if (!INFO || !Array.isArray(INFO.clues) || INFO.clues.length !== 24) throw Error('Open the game online once to download clues.');
+  const clues = INFO.clues.slice();
+  for (let i = 23; i > 0; i--) { const j = randomBelow(i + 1); [clues[i], clues[j]] = [clues[j], clues[i]]; }
+  clues.splice(12, 0, 'FREE');
+  return clues;
+}
 function newPlayer() {
   if (busy) return;
   if (!INFO || INFO.state !== 'open' || Date.now() < INFO.startMs || Date.now() > INFO.endMs) { message(statusText(), true); return; }
   openPlayerDetails('new');
 }
 async function createLocalPlayer(details) {
-  if (!Array.isArray(INFO.clues) || INFO.clues.length !== 24) throw Error('Open the game online once to download clues.');
-  const clues = INFO.clues.slice();
-  for (let i = 23; i > 0; i--) { const j = randomBelow(i + 1); [clues[i], clues[j]] = [clues[j], clues[i]]; }
-  clues.splice(12, 0, 'FREE');
+  const clues = shuffledClues();
   const t = Array.from(crypto.getRandomValues(new Uint8Array(32)), b => b.toString(16).padStart(2, '0')).join('');
   const local = { token: t, clues, eventId: INFO.eventId, order: [], historyReliable: true, firstBingoCount: null, prompted: false, receipt: '', submitted: false, draft: false, registered: false, reviewStatus: 'Pending review', uploadConsent: true, uploadConsentAsked: true, details };
   await writeRecords([['cards', local]]);
@@ -574,11 +602,11 @@ async function saveMyCard() {
 }
 
 // ---------- Printing ----------
-function preparePrint() {
-  if (!card) throw Error('Load a card first.');
+// Rev 4.3: prints the player's card, or a freshly shuffled paper card on the first-visit page.
+function preparePrint(clues) {
   const g = $('pgrid');
   g.replaceChildren();
-  card.clues.forEach((clue, i) => {
+  clues.forEach((clue, i) => {
     const d = document.createElement('div');
     if (i === 12) {
       d.className = 'pc pfree';
@@ -596,8 +624,17 @@ function preparePrint() {
   $('purl').textContent = location.origin + location.pathname;
 }
 function printCard() {
-  if (isSubmitted()) return;
-  try { preparePrint(); window.print(); } catch (e) { message(e.message, true); }
+  if (busy || isSubmitted()) return;
+  try {
+    if (!card && !canPrint()) {
+      message(INFO && INFO.text && INFO.text.startDate ? 'Print a Card opens ' + INFO.text.startDate + '.' : statusText(), true);
+      return;
+    }
+    preparePrint(card ? card.clues : shuffledClues());
+    window.print();
+  } catch (e) {
+    message(e.message, true);
+  }
 }
 
 // ---------- Submission ----------
@@ -685,11 +722,45 @@ async function refreshStatus() {
     scheduleBackground();
   }
 }
+// Rev 4.3: when a submitted player comes back to the page, quietly pick up the
+// organizer's spreadsheet decision (Approved / Not approved / Prize delivered).
+let lastStatusCheck = 0;
+async function quietStatusCheck() {
+  if (busy || submitting || !ready || !card || !isSubmitted() || card.registered === false || navigator.onLine === false) return;
+  if (card.reviewStatus === 'Prize delivered' || Date.now() - lastStatusCheck < 60000) return;
+  lastStatusCheck = Date.now();
+  const t = token;
+  try {
+    const remote = await rpc('loadCard', t);
+    if (busy || token !== t) return;
+    await acceptRemote(t, remote);
+    message(statusText());
+  } catch (e) { /* Keep showing the last known status. */ }
+}
 function warnLeave(e) { e.preventDefault(); e.returnValue = ''; }
+// Rev 4.3: simple "Uploading your submission…" with a rotating indicator - no photo counts.
+function uploadProgressEl() {
+  const el = $('uploadProgress');
+  if (el.dataset.ready) return el;
+  const st = document.createElement('style');
+  st.textContent = '#uploadProgress:not([hidden]){display:flex;flex-direction:column;align-items:center;gap:8px;padding:12px 0;text-align:center}' +
+    '#uploadProgress .up-row{display:flex;align-items:center;gap:10px;font-weight:700}' +
+    '#uploadProgress .up-spin{width:22px;height:22px;flex:none;border:3px solid #d9a634;border-top-color:transparent;border-radius:50%;animation:up-spin .8s linear infinite}' +
+    '#uploadProgress .up-note{font-size:.9em;opacity:.85}' +
+    '@keyframes up-spin{to{transform:rotate(360deg)}}' +
+    '@media (prefers-reduced-motion:reduce){#uploadProgress .up-spin{animation-duration:2.4s}}';
+  document.head.append(st);
+  el.setAttribute('role', 'status');
+  el.setAttribute('aria-live', 'polite');
+  el.innerHTML = '<div class="up-row"><span class="up-spin" aria-hidden="true"></span><span>Uploading your submission…</span></div>' +
+    '<div class="up-note">Please keep this page open.</div>';
+  el.dataset.ready = '1';
+  return el;
+}
 function setUploading(on) {
   if (on) window.addEventListener('beforeunload', warnLeave);
   else window.removeEventListener('beforeunload', warnLeave);
-  $('uploadProgress').hidden = !on;
+  uploadProgressEl().hidden = !on;
   $('entryForm').setAttribute('aria-busy', String(on));
   $('send').textContent = on ? 'Submitting…' : 'Submit Bingo';
 }
@@ -724,16 +795,14 @@ async function start() {
     if (online && token && (!card || card.registered !== false)) {
       try {
         await acceptRemote(token, await rpc('loadCard', token));
+        lastStatusCheck = Date.now();
       } catch (e) {
         if (!/Card not found/.test(e.message)) throw e;
         message('This old card is no longer on the server. Create a new player card.', true);
       }
     }
-    if (!card && INFO && INFO.state === 'open' && Date.now() >= INFO.startMs && Date.now() <= INFO.endMs) {
-      busy = false;
-      await newPlayer();
-      busy = true;
-    }
+    // Rev 4.3: no automatic player form. First visit shows the instructions with
+    // Start Bingo and Print a Card; the player form opens only when Start Bingo is tapped.
     message(statusText());
     cacheShell();
     scheduleBackground();
@@ -823,7 +892,11 @@ $('player').onchange = async (e) => {
 };
 let fitTimer;
 window.addEventListener('resize', () => { clearTimeout(fitTimer); fitTimer = setTimeout(fitText, 120); });
-window.addEventListener('online', () => scheduleBackground());
-document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') scheduleBackground(); });
+window.addEventListener('online', () => { scheduleBackground(); quietStatusCheck(); });
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible') { scheduleBackground(); quietStatusCheck(); }
+});
+// Rev 4.3: if the first-visit page is left open, Start Bingo / Print a Card unlock on time.
+setInterval(() => { if (!busy && !card) { render(); message(statusText()); } }, 60000);
 start();
 // END OF app.js
